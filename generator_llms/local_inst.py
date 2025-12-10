@@ -6,7 +6,11 @@ from transformers import AutoTokenizer
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import re
-from generator_llms.claude_api import get_claude_response
+
+def get_claude_response(prompt):
+    """Lazy import of Claude API to avoid import errors when not using Claude."""
+    from generator_llms.claude_api import get_claude_response as _get_claude_response
+    return _get_claude_response(prompt)
 
 # Load matching tokenizer locally
 # MODEL = "generator_llms/Qwen2.5-14B-Instruct-Q5_K_M.gguf"  
