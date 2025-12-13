@@ -1,5 +1,5 @@
-export CUDA_VISIBLE_DEVICES=0
-file_path=/workspace/s3_data
+export CUDA_VISIBLE_DEVICES=0,1
+file_path=./data
 index_file=$file_path/e5_Flat.index
 corpus_file=$file_path/wiki-18.jsonl
 retriever_name=e5

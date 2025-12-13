@@ -1,8 +1,9 @@
 #!/bin/bash
 # Start all services: retriever, generator, and training
-# GPU allocation:
-#   GPU 0: Retriever (FAISS ~64GB) + Generator LLM (~15GB) = ~79GB
-#   GPU 1: Training (actor/critic/vLLM rollout ~90GB)
+# GPU allocation (8 GPUs):
+#   GPUs 0-5: Retriever (FAISS)
+#   GPUs 6-7: Generator LLM (tensor-parallel-size=2)
+#   GPUs 0-7: Training (8 GPU distributed training)
 
 set -e
 
@@ -75,13 +76,13 @@ log_info "Checking GPU memory..."
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv
 
 # ============================================
-# Step 1: Start Retriever on GPU 0
-# FAISS index needs ~64GB GPU memory
+# Step 1: Start Retriever on GPUs 0-1
+# FAISS index + e5 model
 # ============================================
-log_info "Starting Retriever on GPU 0..."
+log_info "Starting Retriever on GPUs 0-1..."
 
-export CUDA_VISIBLE_DEVICES=0
-file_path=/workspace/s3_data
+export CUDA_VISIBLE_DEVICES=0,1
+file_path=./data
 index_file=$file_path/e5_Flat.index
 corpus_file=$file_path/wiki-18.jsonl
 retriever_name=e5
@@ -107,17 +108,17 @@ if ! wait_for_port $RETRIEVER_PORT "Retriever" 180; then
 fi
 
 # ============================================
-# Step 2: Start Generator LLM on GPU 0
-# Qwen2.5-14B-GPTQ needs ~15GB
+# Step 2: Start Generator LLM on GPUs 6-7
+# Qwen2.5-14B-GPTQ needs ~15GB per GPU
 # ============================================
-log_info "Starting Generator LLM on GPU 0..."
+log_info "Starting Generator LLM on GPUs 6-7..."
 
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=6,7
 nohup python3 -m vllm.entrypoints.openai.api_server \
     --model Qwen/Qwen2.5-14B-Instruct-GPTQ-Int4 \
     --port $GENERATOR_PORT \
     --max-model-len 8192 \
-    --tensor-parallel-size 1 \
+    --tensor-parallel-size 2 \
     > "$LOG_DIR/generator.log" 2>&1 &
 
 GENERATOR_PID=$!
@@ -130,16 +131,14 @@ if ! wait_for_port $GENERATOR_PORT "Generator" 120; then
 fi
 
 # ============================================
-# Step 3: Start Training on GPU 1
-# Training uses ~90GB (actor + critic + vLLM rollout)
-# Note: train_s3.sh sets CUDA_VISIBLE_DEVICES=0 internally,
-#       so we need to run the python command directly with GPU 1
+# Step 3: Start Training on GPUs 2-5
+# Training uses 4 GPUs (avoiding GPUs 0-1 for retriever, GPUs 6-7 for generator)
 # ============================================
-log_info "Starting Training on GPU 1..."
+log_info "Starting Training on GPUs 2-5..."
 log_info "Checking GPU memory before training..."
 nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=2,3,4,5
 export VLLM_ATTENTION_BACKEND=XFORMERS
 
 RANDOM_SEED=42
@@ -152,8 +151,8 @@ nohup python3 -m verl.trainer.main_ppo \
     data.val_files=$DATA_DIR/test_e5_s3.parquet \
     data.train_data_num=null \
     data.val_data_num=null \
-    data.train_batch_size=32 \
-    data.val_batch_size=8 \
+    data.train_batch_size=256 \
+    data.val_batch_size=64 \
     data.max_prompt_length=8000 \
     data.max_response_length=500 \
     data.max_start_length=2000 \
@@ -165,15 +164,15 @@ nohup python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0 \
-    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
-    actor_rollout_ref.actor.ppo_micro_batch_size=4 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+    actor_rollout_ref.actor.ppo_micro_batch_size=8 \
     actor_rollout_ref.rollout.temperature=0.6 \
     actor_rollout_ref.actor.fsdp_config.param_offload=true \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size=8 \
-    actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size=16 \
+    actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
-    actor_rollout_ref.ref.log_prob_micro_batch_size=8 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.state_masking=true \
     critic.optim.lr=1e-5 \
@@ -181,7 +180,7 @@ nohup python3 -m verl.trainer.main_ppo \
     critic.optim.lr_warmup_steps_ratio=0.01 \
     critic.model.path=$BASE_MODEL \
     critic.model.enable_gradient_checkpointing=true \
-    critic.ppo_micro_batch_size=4 \
+    critic.ppo_micro_batch_size=8 \
     algorithm.kl_ctrl.kl_coef=0.001 \
     algorithm.no_think_rl=false \
     trainer.critic_warmup=0 \
@@ -189,7 +188,7 @@ nohup python3 -m verl.trainer.main_ppo \
     +trainer.val_only=false \
     +trainer.val_before_train=false \
     trainer.default_hdfs_dir=null \
-    trainer.n_gpus_per_node=1 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=50 \
     trainer.test_freq=1500 \
@@ -218,9 +217,9 @@ log_info "All services started!"
 log_info "=========================================="
 echo ""
 echo "Services:"
-echo "  - Retriever:  http://127.0.0.1:$RETRIEVER_PORT (GPU 0)"
-echo "  - Generator:  http://127.0.0.1:$GENERATOR_PORT (GPU 0)"
-echo "  - Training:   Running on GPU 1"
+echo "  - Retriever:  http://127.0.0.1:$RETRIEVER_PORT (GPUs 0-1)"
+echo "  - Generator:  http://127.0.0.1:$GENERATOR_PORT (GPUs 6-7)"
+echo "  - Training:   Running on GPUs 2-5 (4 GPU distributed)"
 echo ""
 echo "Logs:"
 echo "  - Retriever:  $LOG_DIR/retriever.log"
