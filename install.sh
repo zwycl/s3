@@ -3,6 +3,44 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Check and install CUDA Toolkit if not present (required for flash-attn compilation)
+if ! command -v nvcc &> /dev/null; then
+    echo "CUDA Toolkit not found. Installing CUDA Toolkit 12.6..."
+
+    # Download and install NVIDIA CUDA keyring
+    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
+    sudo dpkg -i /tmp/cuda-keyring.deb
+    sudo apt update
+
+    # Install CUDA toolkit
+    sudo apt install -y cuda-toolkit-12-6
+
+    # Set environment variables for current session
+    export CUDA_HOME=/usr/local/cuda-12.6
+    export PATH=$CUDA_HOME/bin:$PATH
+    export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
+    # Add to bashrc for future sessions
+    if ! grep -q "CUDA_HOME=/usr/local/cuda-12.6" ~/.bashrc; then
+        cat >> ~/.bashrc << 'EOF'
+
+# CUDA Toolkit 12.6
+export CUDA_HOME=/usr/local/cuda-12.6
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+EOF
+    fi
+
+    echo "CUDA Toolkit 12.6 installed successfully."
+else
+    echo "CUDA Toolkit already installed: $(nvcc --version | grep release)"
+    # Ensure CUDA_HOME is set
+    if [ -z "$CUDA_HOME" ]; then
+        export CUDA_HOME=$(dirname $(dirname $(which nvcc)))
+        export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+    fi
+fi
+
 # Install uv package manager
 pip install uv
 
