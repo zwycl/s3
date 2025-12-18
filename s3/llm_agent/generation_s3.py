@@ -1,5 +1,6 @@
 import torch
 import re
+import time
 from collections import defaultdict
 import os
 from typing import List, Dict, Any, Tuple, Optional, Union
@@ -84,11 +85,16 @@ class LLMGenerationManager:
 
     def _postprocess_responses(self, responses: torch.Tensor) -> Tuple[torch.Tensor, List[str], List[str], List[bool]]:
         """Process responses to extract search queries."""
+        # Debug: check response lengths and EOS
+        resp_lengths = (responses != self.tokenizer.pad_token_id).sum(dim=1)
+        max_len = responses.shape[1]
+        hit_max = (resp_lengths == max_len).sum().item()
+        print(f"[DEBUG] Response lengths: min={resp_lengths.min().item()}, max={resp_lengths.max().item()}, hit_max_len={hit_max}/{responses.shape[0]}, max_allowed={max_len}")
+
         responses_str = self.tokenizer.batch_decode(
-            responses, 
+            responses,
             skip_special_tokens=True
         )
-
         # Ensure responses end with </query> tag if it exists
         new_responses_str = []
         for resp in responses_str:
@@ -116,17 +122,27 @@ class LLMGenerationManager:
             # Extract query if present
             if query_match:
                 query_text = query_match.group(1).strip()
+                # Handle nested <query> tags (strip them)
+                if '<query>' in query_text:
+                    inner_match = re.search(r'<query>(.*?)(?:</query>|$)', query_text, re.DOTALL)
+                    if inner_match:
+                        query_text = inner_match.group(1).strip()
                 try:
-                    import json
                     json_data = json.loads(query_text)
                     if 'query' in json_data:
                         queries.append(json_data['query'])
                     else:
                         queries.append("")
-                except:
+                except Exception as e:
+                    print(f"[DEBUG] JSON decode failed for query_text: {query_text[:100]}")
                     queries.append("")
             else:
-                queries.append("")
+                # Fallback: try to extract bare JSON with "query" key
+                bare_json_match = re.search(r'\{\s*"query"\s*:\s*"([^"]*)"\s*\}', resp)
+                if bare_json_match:
+                    queries.append(bare_json_match.group(1))
+                else:
+                    queries.append("")
                 
             search_complete_flags.append(search_complete)
                     
@@ -320,8 +336,10 @@ class LLMGenerationManager:
             # Generate with active sequences
             rollings_active = DataProto.from_dict({
                 k: v[active_mask] for k, v in rollings.batch.items()
-            })            
+            })
+            _gen_start = time.time()
             gen_output = self._generate_with_gpu_padding(rollings_active)
+            print(f"[TIMING] Generate turn {step+1} ({active_mask.sum().item()} active): {time.time() - _gen_start:.2f}s")
 
             # Process outputs 
             meta_info = gen_output.meta_info            
@@ -365,8 +383,10 @@ class LLMGenerationManager:
 
             rollings_active = DataProto.from_dict({
                 k: v[active_mask] for k, v in rollings.batch.items()
-            })            
+            })
+            _gen_start = time.time()
             gen_output = self._generate_with_gpu_padding(rollings_active)
+            print(f"[TIMING] Generate final turn ({active_mask.sum().item()} active): {time.time() - _gen_start:.2f}s")
 
             # Process outputs - keeping exact compatibility with Search-R1
             meta_info = gen_output.meta_info            
@@ -451,8 +471,12 @@ class LLMGenerationManager:
             
         
         search_queries = [content for action, content in zip(cur_actions, contents) if action == 'search']
+        action_counts = {a: cur_actions.count(a) for a in set(cur_actions)}
+        print(f"[DEBUG] Active: {sum(active_mask)}, Actions: {action_counts}, Search queries: {len(search_queries)}")
         if do_search and search_queries:
+            _retriever_start = time.time()
             search_results = self.batch_search(search_queries)
+            print(f"[TIMING] Retriever batch_search ({len(search_queries)} queries): {time.time() - _retriever_start:.2f}s")
             assert len(search_results) == sum([1 for action in cur_actions if action == 'search'])
         else:
             print("No search queries or no search is allowed")
@@ -499,8 +523,8 @@ class LLMGenerationManager:
                         valid_action.append(1)
                         is_search.append(0)
                 else:
-                    # Invalid action
-                    feedback = "\n\nThe information is not enough to answer the question. Let me dive deeper by generating a brand new search query between <query> and </query> tags in JSON format:\n<query>\n"
+                    # Invalid action - prompt model to generate a query
+                    feedback = "\n\nThe information is not enough to answer the question. Let me dive deeper by generating a brand new search query between <query> and </query> tags in JSON format:\n"
                     next_obs.append(feedback)
                     # next_obs.append('')
                     dones.append(False)
@@ -572,7 +596,7 @@ class LLMGenerationManager:
                 
                 if query_match:
                     query_text = query_match.group(1).strip()
-                    
+
                     # Check if the query is in JSON format
                     try:
                         # Try to parse as JSON
@@ -592,7 +616,7 @@ class LLMGenerationManager:
                                 except:
                                     print(f"Error in parsing query: {query_text}")
                                     content = query_text
-                                    
+
                                 action = "search"
                             else:
                                 content = query_text
@@ -601,15 +625,17 @@ class LLMGenerationManager:
                             print(f"Error in json parsing: {json_data}")
                             content = query_text
                             action = "search"
-                            
+
                     except json.JSONDecodeError:
                         # If not valid JSON, try to use the text directly
+                        print(f"[DEBUG] JSON decode failed for query_text: {query_text}")
                         content = query_text
                         action = "search"
-                        
+
                 else:
                     content = ''
                     action = None
+                    print(f"[DEBUG] No <query> tag found in prediction (len={len(prediction)}): {repr(prediction[:200])}")
                     
                 # Check for search completion flag
                 search_complete = False

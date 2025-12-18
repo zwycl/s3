@@ -161,7 +161,7 @@ def compute_advantage(data: DataProto, adv_estimator, gamma=1.0, lam=1.0, num_re
 
 def reduce_metrics(metrics: dict):
     for key, val in metrics.items():
-        metrics[key] = np.mean(val)
+        metrics[key] = float(np.mean(val))
     return metrics
 
 
@@ -909,9 +909,12 @@ class RayPPOTrainer(object):
                             for key in final_gen_batch_output.batch.keys():
                                 final_gen_batch_output.batch[key] = final_gen_batch_output.batch[key].long()
 
-                            with torch.no_grad():
-                                output = self.actor_rollout_wg.compute_log_prob(final_gen_batch_output)
-                                final_gen_batch_output = final_gen_batch_output.union(output)
+                            print(f"[TIMING] Generation loop complete. Starting compute_log_prob...")
+                            with _timer('log_prob', timing_raw):
+                                with torch.no_grad():
+                                    output = self.actor_rollout_wg.compute_log_prob(final_gen_batch_output)
+                                    final_gen_batch_output = final_gen_batch_output.union(output)
+                            print(f"[TIMING] compute_log_prob done: {timing_raw.get('log_prob', 'N/A'):.2f}s")
 
                             # batch.non_tensor_batch['uid'] = np.array([str(uuid.uuid4()) for _ in range(len(batch.batch))],
                             #                                         dtype=object)
@@ -939,16 +942,21 @@ class RayPPOTrainer(object):
 
                         if self.use_reference_policy:
                             # compute reference log_prob
+                            print(f"[TIMING] Starting compute_ref_log_prob...")
                             with _timer('ref', timing_raw):
                                 ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
                                 batch = batch.union(ref_log_prob)
+                            print(f"[TIMING] compute_ref_log_prob done: {timing_raw.get('ref', 'N/A'):.2f}s")
 
                         # compute values
                         if self.use_critic:
+                            print(f"[TIMING] Starting compute_values...")
                             with _timer('values', timing_raw):
                                 values = self.critic_wg.compute_values(batch)
                                 batch = batch.union(values)
+                            print(f"[TIMING] compute_values done: {timing_raw.get('values', 'N/A'):.2f}s")
 
+                        print(f"[TIMING] Starting reward & advantage computation...")
                         with _timer('adv', timing_raw):
                             # compute scores. Support both model and function-based.
                             # We first compute the scores using reward model. Then, we call reward_fn to combine
@@ -977,23 +985,28 @@ class RayPPOTrainer(object):
                                                     gamma=self.config.algorithm.gamma,
                                                     lam=self.config.algorithm.lam,
                                                     num_repeat=self.config.actor_rollout_ref.rollout.n)
+                        print(f"[TIMING] reward & advantage done: {timing_raw.get('adv', 'N/A'):.2f}s")
 
                         # update critic
                         if self.use_critic:
+                            print(f"[TIMING] Starting update_critic...")
                             with _timer('update_critic', timing_raw):
                                 critic_output = self.critic_wg.update_critic(batch)
                             critic_output_metrics = reduce_metrics(critic_output.meta_info['metrics'])
                             metrics.update(critic_output_metrics)
+                            print(f"[TIMING] update_critic done: {timing_raw.get('update_critic', 'N/A'):.2f}s")
 
                         # implement critic warmup
                         if self.config.trainer.critic_warmup <= self.global_steps:
                             # update actor
+                            print(f"[TIMING] Starting update_actor...")
                             with _timer('update_actor', timing_raw):
                                 if self.config.do_search and self.config.actor_rollout_ref.actor.state_masking:
                                     batch, metrics = self._create_loss_mask(batch, metrics)
                                 actor_output = self.actor_rollout_wg.update_actor(batch)
                             actor_output_metrics = reduce_metrics(actor_output.meta_info['metrics'])
                             metrics.update(actor_output_metrics)
+                            print(f"[TIMING] update_actor done: {timing_raw.get('update_actor', 'N/A'):.2f}s")
                             
                         if self.use_utility_score and not self.use_generation_score:
                             reward_metrics = compute_reward_metrics_utility(batch)
@@ -1018,7 +1031,7 @@ class RayPPOTrainer(object):
                             with _timer('save_checkpoint', timing_raw):
                                 self._save_checkpoint()
                                 
-                        elif self.global_steps == 20:
+                        elif self.global_steps == 2:
                             with _timer('save_checkpoint', timing_raw):
                                 self._save_checkpoint()
 
@@ -1036,14 +1049,14 @@ class RayPPOTrainer(object):
 
                     self.global_steps += 1
 
-                    # if self.global_steps >= self.total_training_steps:
+                    if self.global_steps >= self.total_training_steps:
 
-                    #     # perform validation after training
-                    #     if self.val_reward_fn is not None:
-                    #         val_metrics = self._validate()
-                    #         pprint(f'Final validation metrics: {val_metrics}')
-                    #         logger.log(data=val_metrics, step=self.global_steps)
-                    #     return
+                        # perform validation after training
+                        if self.val_reward_fn is not None:
+                            val_metrics = self._validate()
+                            pprint(f'Final validation metrics: {val_metrics}')
+                            logger.log(data=val_metrics, step=self.global_steps)
+                        return
                     
                 except Exception as e:
                     print(f'Error in training loop: {e}, step {self.global_steps}, skipping this batch')
