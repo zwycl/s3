@@ -505,7 +505,13 @@ def output_sequence(solution_str, ground_truth):
     
     
     question = ground_truth['question']
-    golden_answers = ground_truth['target'].tolist() if isinstance(ground_truth['target'], list) else [ground_truth['target']]
+    target = ground_truth['target']
+    if hasattr(target, 'tolist'):
+        golden_answers = target.tolist()
+    elif isinstance(target, list):
+        golden_answers = target
+    else:
+        golden_answers = [target]
     
     # Get documents with titles, handling important documents
     try:

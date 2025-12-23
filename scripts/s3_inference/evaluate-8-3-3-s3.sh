@@ -3,17 +3,11 @@ data_name=nq_hotpotqa_train
 RANDOM_SEED=${1:-42}
 
 export CUDA_VISIBLE_DEVICES=1,2,3,4,5
-export DATA_DIR=data/${data_name} # first download the data from https://huggingface.co/datasets/PeterJinGo/nq_hotpotqa_train
+export DATA_DIR=data/${data_name}
 
 export BASE_MODEL=""
 
-# set -x
-export VLLM_ATTENTION_BACKEND=XFORMERS # vllm + qwen2-7b with flash_attn has some issues
-
-# max_prompt_length = (config['training']['max_start_length'] + config['training']['max_response_length'] * (config['training']['max_turns'] - 1) + config['training']['max_obs_length'] * config['training']['max_turns'])
-# data.val_files=data/mirage/mirage_test.parquet \
-# mirage_medcorp_test.parquet
-
+export VLLM_ATTENTION_BACKEND=XFORMERS
 
 PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     data.train_files=$DATA_DIR/train_e5_s3.parquet  \
@@ -28,7 +22,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     data.max_obs_length=1400 \
     data.shuffle_train_dataloader=True \
     algorithm.adv_estimator=gae \
-    actor_rollout_ref.model.path=verl_checkpoints/s3-8-3-3-20steps \
+    actor_rollout_ref.model.path=verl_checkpoints/s3_8_3_3_${RANDOM_SEED}/actor/global_step_20 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.enable_gradient_checkpointing=true \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -46,7 +40,7 @@ PYTHONUNBUFFERED=1 python3 -m verl.trainer.main_ppo \
     critic.optim.lr=1e-5 \
     critic.model.use_remove_padding=True \
     critic.optim.lr_warmup_steps_ratio=0.05 \
-    critic.model.path=verl_checkpoints/s3-8-3-3-20steps \
+    critic.model.path=verl_checkpoints/s3_8_3_3_${RANDOM_SEED}/actor/global_step_20 \
     critic.model.enable_gradient_checkpointing=true \
     critic.ppo_micro_batch_size=10 \
     algorithm.kl_ctrl.kl_coef=0.001 \
