@@ -239,7 +239,7 @@ def main_task(config):
     reward_fn = RewardManager(tokenizer=tokenizer, num_examine=0, output_context_dir=config.output_context_dir)
 
     # Note that we always use function-based RM for validation
-    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=1, val_only=True, output_context_dir=config.output_context_dir)
+    val_reward_fn = RewardManager(tokenizer=tokenizer, num_examine=0, val_only=True, output_context_dir=config.output_context_dir)
 
     resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
     trainer = RayPPOTrainer(config=config,

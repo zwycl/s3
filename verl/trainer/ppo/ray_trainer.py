@@ -29,6 +29,7 @@ import json
 from collections import defaultdict
 
 import numpy as np
+import pandas as pd
 from codetiming import Timer
 from omegaconf import OmegaConf, open_dict
 from verl import DataProto
@@ -550,7 +551,21 @@ class RayPPOTrainer(object):
                                        filter_prompts=True,
                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
                                        truncation='error')
-        if self.config.data.val_data_num is not None:
+        if self.config.data.get('val_data_num_per_source') is not None:
+            # Sample per data source
+            val_data_num_per_source = self.config.data.val_data_num_per_source
+            sampled_dfs = []
+            for data_source in self.val_dataset.dataframe['data_source'].unique():
+                source_df = self.val_dataset.dataframe[self.val_dataset.dataframe['data_source'] == data_source]
+                if len(source_df) > val_data_num_per_source:
+                    print(f"Sampling {val_data_num_per_source} questions from {data_source} (total: {len(source_df)})")
+                    sampled_df = source_df.sample(n=val_data_num_per_source, random_state=self.config.data.random_seed)
+                else:
+                    print(f"Using all {len(source_df)} questions from {data_source}")
+                    sampled_df = source_df
+                sampled_dfs.append(sampled_df)
+            self.val_dataset.dataframe = pd.concat(sampled_dfs, ignore_index=True)
+        elif self.config.data.val_data_num is not None:
             if self.config.data.val_data_num > len(self.val_dataset.dataframe):
                 print(f"[WARNING] validation dataset size is smaller than desired size. Using the dataset as the original size {len(self.val_dataset.dataframe)}")
             else:
@@ -1031,7 +1046,7 @@ class RayPPOTrainer(object):
                             with _timer('save_checkpoint', timing_raw):
                                 self._save_checkpoint()
                                 
-                        elif self.global_steps == 2:
+                        elif self.global_steps in [10, 15, 20]:
                             with _timer('save_checkpoint', timing_raw):
                                 self._save_checkpoint()
 

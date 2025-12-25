@@ -218,9 +218,11 @@ class DataParallelPPOActor(BasePPOActor):
         # Split to make minibatch iterator for updating the actor
         # See PPO paper for details. https://arxiv.org/abs/1707.06347
         dataloader = batch.split(self.config.ppo_mini_batch_size)
+        num_mini_batches = len(dataloader)
 
         metrics = {}
         for batch_idx, data in enumerate(dataloader):
+            print(f"[Actor] Mini-batch {batch_idx + 1}/{num_mini_batches}")
             # split batch into micro_batches
             mini_batch = data
             if self.config.use_dynamic_bsz:

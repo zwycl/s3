@@ -395,7 +395,7 @@ def compute_score_rag(solution_str, ground_truth, zeroshot_answers, use_utility_
     else:
         raise ValueError("use_generation_score and use_utility_score cannot both be False")
     
-    do_print = random.randint(1, 16) == 1
+    do_print = random.randint(1, 50) == 1
         
     if do_print:
         print(f"--------------------------------")
@@ -407,8 +407,8 @@ def compute_score_rag(solution_str, ground_truth, zeroshot_answers, use_utility_
         print(f"Answer zeroshot score: {answer_zeroshot_score}")
         print(f"Utility score: {utility_score}")
         print(f"Generation score: {generation_score}")
-        print(f"Extracted doc_info: {context_with_info}")
-        print(f"Solution string: {solution_str}")
+        # print(f"Extracted doc_info: {context_with_info}")
+        # print(f"Solution string: {solution_str}")
     
     return score, answer_zeroshot, answer_zeroshot_score
 
@@ -446,7 +446,7 @@ def output_sequence(solution_str, ground_truth):
         context_with_info = solution_str
     
         
-    do_print = random.randint(1, 16) == 1
+    do_print = random.randint(1, 1000) == 1
         
     if do_print:
         print(f"--------------------------------")

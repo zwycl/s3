@@ -91,6 +91,34 @@ class LLMGenerationManager:
         hit_max = (resp_lengths == max_len).sum().item()
         print(f"[DEBUG] Response lengths: min={resp_lengths.min().item()}, max={resp_lengths.max().item()}, hit_max_len={hit_max}/{responses.shape[0]}, max_allowed={max_len}")
 
+        # Debug: check for problematic responses
+        for i, resp_len in enumerate(resp_lengths):
+            if resp_len == 0:
+                print(f"[DEBUG] Empty response at index {i} - model generated nothing")
+                # Print the input context that led to empty generation
+                try:
+                    if hasattr(self, '_last_generation_input_ids') and self._last_generation_input_ids is not None:
+                        print(f"[DEBUG] _last_generation_input_ids shape: {self._last_generation_input_ids.shape}, responses shape: {responses.shape}")
+                        if i < self._last_generation_input_ids.shape[0]:
+                            ctx = self.tokenizer.decode(self._last_generation_input_ids[i], skip_special_tokens=False)
+                            print(f"[DEBUG] Input context for empty response {i} (last 500 chars):\n{ctx[-500:]}\n")
+                        else:
+                            print(f"[DEBUG] Index {i} out of bounds for _last_generation_input_ids (shape={self._last_generation_input_ids.shape[0]})")
+                    else:
+                        print(f"[DEBUG] _last_generation_input_ids not available")
+                except Exception as e:
+                    print(f"[DEBUG] Error printing context: {e}")
+            elif resp_len > 500:
+                decoded = self.tokenizer.decode(responses[i], skip_special_tokens=True)
+                if decoded.strip().startswith('<information>'):
+                    print(f"[DEBUG] Response {i} starts with <information> (len={resp_len}), model may be regurgitating observation")
+                    print(f"[DEBUG] First 200 chars: {repr(decoded[:200])}")
+                    # Dump context for debugging - check if this was passed in via meta_info
+                    if hasattr(self, '_last_generation_input_ids') and self._last_generation_input_ids is not None:
+                        if i < self._last_generation_input_ids.shape[0]:
+                            ctx = self.tokenizer.decode(self._last_generation_input_ids[i], skip_special_tokens=False)
+                            print(f"[DEBUG] Context for response {i} (last 800 chars):\n{ctx[-800:]}")
+
         responses_str = self.tokenizer.batch_decode(
             responses,
             skip_special_tokens=True
@@ -150,18 +178,46 @@ class LLMGenerationManager:
         return responses, responses_str, queries, search_complete_flags
 
     def _process_next_obs(self, next_obs: List[str]) -> torch.Tensor:
-        """Process next observations from environment."""
-        
+        """Process next observations from environment.
+
+        Wraps observations with proper chat template markers to ensure
+        the model sees a valid multi-turn conversation structure.
+        """
+        # Chat template markers
+        PREFIX = "<|im_end|>\n<|im_start|>user\n"
+        SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
+
+        # Tokenize prefix/suffix once to know their lengths
+        prefix_ids = self.tokenizer(PREFIX, add_special_tokens=False, return_tensors='pt')['input_ids']
+        suffix_ids = self.tokenizer(SUFFIX, add_special_tokens=False, return_tensors='pt')['input_ids']
+        wrapper_len = prefix_ids.shape[1] + suffix_ids.shape[1]
+        max_content_len = self.config.max_obs_length - wrapper_len
+
+        # Wrap observations with proper chat template markers
+        # This fixes the bug where the model generates <important_info> but stops
+        # before generating <search_complete> and <query> tags
+        wrapped_obs = []
+        for obs in next_obs:
+            if obs.strip():  # Only wrap non-empty observations
+                content = obs.strip()
+                # Truncate content if needed, preserving the wrapper tokens
+                content_ids = self.tokenizer(content, add_special_tokens=False, return_tensors='pt')['input_ids']
+                if content_ids.shape[1] > max_content_len:
+                    print(f"[WARNING] Observation content too long ({content_ids.shape[1]} > {max_content_len}), truncating")
+                    content_ids = content_ids[:, :max_content_len]
+                    content = self.tokenizer.decode(content_ids[0], skip_special_tokens=False)
+                # Close assistant turn, add observation as user turn, reopen assistant turn
+                wrapped = f"{PREFIX}{content}{SUFFIX}"
+            else:
+                wrapped = ""
+            wrapped_obs.append(wrapped)
+
         next_obs_ids = self.tokenizer(
-            next_obs, 
+            wrapped_obs,
             padding='longest',
             return_tensors='pt',
             add_special_tokens=False,
         )['input_ids']
-
-        if next_obs_ids.shape[1] > self.config.max_obs_length:
-            print(f"[WARNING] OBSERVATION TOO LONG, CONSIDER CHANGING YOUR CONFIG, {next_obs_ids.shape[1]} & {self.config.max_obs_length}")            
-            next_obs_ids = next_obs_ids[:, :self.config.max_obs_length]
 
         return next_obs_ids
 
@@ -245,6 +301,9 @@ class LLMGenerationManager:
         """
         Wrapper for generation that handles multi-GPU padding requirements.
         """
+        # Store input_ids for debugging problematic responses
+        self._last_generation_input_ids = active_batch.batch['input_ids'].clone()
+
         num_gpus = self.config.num_gpus
         if num_gpus <= 1:
             return self.actor_rollout_wg.generate_sequences(active_batch)
@@ -324,6 +383,7 @@ class LLMGenerationManager:
                 print(f"No <question>...</question> tags found in the initial input {input_text}")
 
         # Main generation loop
+        print(f"[DEBUG] max_turns config value: {self.config.max_turns}")
         for step in range(self.config.max_turns):
             if not active_mask.sum():
                 break
@@ -635,7 +695,11 @@ class LLMGenerationManager:
                 else:
                     content = ''
                     action = None
-                    print(f"[DEBUG] No <query> tag found in prediction (len={len(prediction)}): {repr(prediction[:200])}")
+                    if not search_complete_match:
+                        if len(prediction) == 0:
+                            print(f"[DEBUG] Empty prediction at index - likely padded inactive sequence")
+                        else:
+                            print(f"[DEBUG] No <query> tag found in prediction (len={len(prediction)}): {repr(prediction[:200])}")
                     
                 # Check for search completion flag
                 search_complete = False

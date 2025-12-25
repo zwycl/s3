@@ -89,20 +89,24 @@ def save_results(answers, result_file, stats_file, total_questions, data_source_
         logger.error(f"Error saving results: {str(e)}")
         raise
 
-def load_context_cache(context_dir: str, data_sources: List[str], logger) -> Dict[str, Dict]:
-    """Load all context files into memory at startup"""
+def load_context_cache(context_dir: str, data_sources: List[str], logger) -> Tuple[Dict[str, Dict], Dict[str, int]]:
+    """Load all context files into memory at startup and count examples per dataset"""
     logger.info("Loading context cache...")
     cache = {}
+    context_counts = {}
     for source in data_sources:
         context_file = os.path.join(context_dir, f"{source}_output_sequences.json")
         if os.path.exists(context_file):
             logger.info(f"Loading context file: {context_file}")
             with open(context_file, 'r') as f:
                 cache[source] = json.load(f)
+                context_counts[source] = len(cache[source])
+                logger.info(f"  {source}: {context_counts[source]} examples in context")
         else:
             logger.warning(f"Context file not found: {context_file}")
+            context_counts[source] = 0
     logger.info("Context cache loading complete")
-    return cache
+    return cache, context_counts
 
 def process_questions_batch(questions_batch: List[Tuple], context_cache: Dict, topk: int, logger) -> List[Dict]:
     """Process a batch of questions using batched API calls"""
@@ -211,7 +215,10 @@ def process_dataset(input_file: str, result_file: str, context_dir: str, num_wor
             'accuracy': 0.0,
             'no_context': 0,
             'em_correct': 0,
-            'em_accuracy': 0.0
+            'em_accuracy': 0.0,
+            'context_count': 0,
+            'context_accuracy': 0.0,
+            'context_em_accuracy': 0.0
         }
     
     # Filter out already processed questions
@@ -235,8 +242,16 @@ def process_dataset(input_file: str, result_file: str, context_dir: str, num_wor
     stats_file = result_file.replace('.json', '_stats.json')
     logger.info(f"Stats file will be saved to: {stats_file}")
     
-    # Load context cache
-    context_cache = load_context_cache(context_dir, df['data_source'].unique(), logger)
+    # Load context cache and get counts per dataset
+    context_cache, context_counts = load_context_cache(context_dir, df['data_source'].unique(), logger)
+
+    # Add context counts to data_source_stats
+    for data_source in df['data_source'].unique():
+        data_source_stats[data_source]['context_count'] = context_counts.get(data_source, 0)
+
+    logger.info("\nContext counts per data source:")
+    for source, count in context_counts.items():
+        logger.info(f"  {source}: {count} examples")
     
     # Process remaining questions in parallel using process pool
     logger.info(f"Processing remaining questions with {num_workers} workers...")
@@ -289,35 +304,51 @@ def process_dataset(input_file: str, result_file: str, context_dir: str, num_wor
                             if result['is_em']:
                                 data_source_stats[data_source]['em_correct'] += 1
                             data_source_stats[data_source]['accuracy'] = (
-                                data_source_stats[data_source]['correct'] / 
+                                data_source_stats[data_source]['correct'] /
                                 data_source_stats[data_source]['total']
                             )
                             data_source_stats[data_source]['em_accuracy'] = (
-                                data_source_stats[data_source]['em_correct'] / 
+                                data_source_stats[data_source]['em_correct'] /
                                 data_source_stats[data_source]['total']
                             )
+                            # Update context-based accuracy
+                            ctx_count = data_source_stats[data_source].get('context_count', data_source_stats[data_source]['total'])
+                            if ctx_count > 0:
+                                data_source_stats[data_source]['context_accuracy'] = data_source_stats[data_source]['correct'] / ctx_count
+                                data_source_stats[data_source]['context_em_accuracy'] = data_source_stats[data_source]['em_correct'] / ctx_count
                     
                     # Save results periodically
-                    if len(results_buffer) >= 10000:
+                    if len(results_buffer) >= 1000:
                         save_results(answers, result_file, stats_file, total_questions, data_source_stats, logger)
                         results_buffer = []
                         
                         # Log statistics
                         logger.info("\nCurrent statistics per data source:")
                         for source, stats in data_source_stats.items():
+                            ctx_count = stats.get('context_count', stats['total'])
+                            ctx_acc = stats['correct'] / ctx_count if ctx_count > 0 else 0
+                            ctx_em_acc = stats['em_correct'] / ctx_count if ctx_count > 0 else 0
                             logger.info(f"{source}: {stats['correct']}/{stats['total']} correct ({stats['accuracy']:.2%}), {stats['em_correct']}/{stats['total']} em correct ({stats['em_accuracy']:.2%})")
+                            logger.info(f"  -> Based on context count ({ctx_count}): LLM {ctx_acc:.2%}, EM {ctx_em_acc:.2%}")
                 
                 except Exception as e:
                     logger.error(f"Error processing batch: {str(e)}")
     
+    # Compute final context-based metrics before saving
+    logger.info("\nFinal Statistics per Data Source:")
+    for source, stats in data_source_stats.items():
+        ctx_count = stats.get('context_count', stats['total'])
+        ctx_acc = stats['correct'] / ctx_count if ctx_count > 0 else 0
+        ctx_em_acc = stats['em_correct'] / ctx_count if ctx_count > 0 else 0
+        # Store context-based accuracy in stats
+        stats['context_accuracy'] = ctx_acc
+        stats['context_em_accuracy'] = ctx_em_acc
+        logger.info(f"{source}: {stats['correct']}/{stats['total']} correct ({stats['accuracy']:.2%}), {stats['em_correct']}/{stats['total']} em correct ({stats['em_accuracy']:.2%})")
+        logger.info(f"  -> Based on context count ({ctx_count}): LLM {ctx_acc:.2%}, EM {ctx_em_acc:.2%}")
+
     # Save final results
     logger.info("\nSaving final results")
     save_results(answers, result_file, stats_file, total_questions, data_source_stats, logger)
-    
-    # Print final statistics
-    logger.info("\nFinal Statistics per Data Source:")
-    for source, stats in data_source_stats.items():
-        logger.info(f"{source}: {stats['correct']}/{stats['total']} correct ({stats['accuracy']:.2%}), {stats['em_correct']}/{stats['total']} em correct ({stats['em_accuracy']:.2%})")
     logger.info(f"\nResults saved to: {result_file}")
     logger.info(f"Statistics saved to: {stats_file}")
     logger.info(f"Log file saved to: {log_file}")
