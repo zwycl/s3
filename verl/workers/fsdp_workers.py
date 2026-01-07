@@ -430,6 +430,11 @@ class ActorRolloutRefWorker(Worker):
         
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
+        # Clear memory before generation to prevent fragmentation OOM
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
         prompts = prompts.to('cuda')
         # set to False if it is validation
         recompute_log_prob = prompts.meta_info.get('recompute_log_prob', True)

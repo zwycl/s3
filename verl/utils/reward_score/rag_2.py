@@ -394,7 +394,7 @@ def extract_titles_and_texts(solution_str):
     
     
 
-def check_answer_correct(answer, golden_answers, model="Qwen/Qwen2.5-14B-Instruct-GPTQ-Int4"):
+def check_answer_correct(answer, golden_answers, model="Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"):
     answer_context_score = answer_span_check(
         prediction=answer,
         golden_answers=golden_answers

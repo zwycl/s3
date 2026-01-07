@@ -843,6 +843,11 @@ class RayPPOTrainer(object):
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
+                # Clear GPU memory between steps to prevent OOM
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+
                 self.global_steps += 1
 
                 if self.global_steps >= self.total_training_steps:
